@@ -31,6 +31,7 @@ import {
   Cell 
 } from 'recharts';
 import { format, differenceInDays } from 'date-fns';
+import axios from 'axios';
 import { cn } from './lib/utils';
 import { DEEPAYAN_SHEET, SSC_CGL_SECTIONS, type DSAPhase, type DSAQuestion } from './data';
 
@@ -74,6 +75,14 @@ export default function App() {
   });
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
+  // Auth & Sync State
+  const [githubToken, setGithubToken] = useState<string | null>(() => localStorage.getItem('deepayan_github_token'));
+  const [user, setUser] = useState<{ login: string, name: string, avatar_url: string } | null>(null);
+  const [gistId, setGistId] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+
   // Persistence
   const [dsaProgress, setDsaProgress] = useState<Record<string, boolean>>(() => {
     const saved = localStorage.getItem('deepayan_dsa');
@@ -136,6 +145,120 @@ export default function App() {
     }
     localStorage.setItem('deepayan_theme', JSON.stringify(isDarkMode));
   }, [isDarkMode]);
+
+  // --- GitHub Auth & Sync Logic ---
+
+  const checkAuth = async (token: string) => {
+    try {
+      setIsSyncing(true);
+      const res = await axios.get('https://api.github.com/user', {
+        headers: { Authorization: `token ${token}` }
+      });
+      setUser(res.data);
+      localStorage.setItem('deepayan_github_token', token);
+      setGithubToken(token);
+      setLoginError(null);
+      fetchGistData(token);
+    } catch (err: any) {
+      console.error('Auth failed:', err);
+      setLoginError('Invalid token or network error. Ensure your token has "gist" and "user" scopes.');
+      handleLogout();
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const fetchGistData = async (token: string) => {
+    try {
+      setIsSyncing(true);
+      const gistsResponse = await axios.get('https://api.github.com/gists', {
+        headers: { Authorization: `token ${token}` }
+      });
+      
+      const appGist = gistsResponse.data.find((g: any) => g.files['deepayan_os_data.json']);
+      
+      if (appGist) {
+        setGistId(appGist.id);
+        const gistDetail = await axios.get(appGist.url, {
+          headers: { Authorization: `token ${token}` }
+        });
+        const content = gistDetail.data.files['deepayan_os_data.json'].content;
+        const remoteData = JSON.parse(content);
+        
+        if (remoteData.dsa) setDsaProgress(remoteData.dsa);
+        if (remoteData.ssc) setSscProgress(remoteData.ssc);
+        if (remoteData.tasks) setDailyTasks(remoteData.tasks);
+        if (remoteData.history) setProgressHistory(remoteData.history);
+        
+        setLastSyncedAt(new Date());
+      }
+    } catch (err) {
+      console.error('Failed to fetch Gist data:', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const syncToGist = async () => {
+    if (!githubToken || !user) return;
+    try {
+      setIsSyncing(true);
+      const data = {
+        dsa: dsaProgress,
+        ssc: sscProgress,
+        tasks: dailyTasks,
+        history: progressHistory
+      };
+      
+      const payload = {
+        description: 'Deepayan Life & Career OS Data',
+        public: false,
+        files: {
+          'deepayan_os_data.json': {
+            content: JSON.stringify(data)
+          }
+        }
+      };
+
+      if (gistId) {
+        await axios.patch(`https://api.github.com/gists/${gistId}`, payload, {
+          headers: { Authorization: `token ${githubToken}` }
+        });
+      } else {
+        const createResponse = await axios.post('https://api.github.com/gists', payload, {
+          headers: { Authorization: `token ${githubToken}` }
+        });
+        setGistId(createResponse.data.id);
+      }
+      setLastSyncedAt(new Date());
+    } catch (err) {
+      console.error('Failed to sync to Gist:', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Debounced sync
+  useEffect(() => {
+    if (!githubToken || !user) return;
+    const timer = setTimeout(() => {
+      syncToGist();
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [dsaProgress, sscProgress, dailyTasks, progressHistory, githubToken, user]);
+
+  useEffect(() => {
+    if (githubToken) {
+      checkAuth(githubToken);
+    }
+  }, []);
+
+  const handleLogout = () => {
+    setUser(null);
+    setGistId(null);
+    setGithubToken(null);
+    localStorage.removeItem('deepayan_github_token');
+  };
 
   // --- Calculations ---
   const dsaStats = useMemo(() => {
@@ -234,6 +357,64 @@ export default function App() {
     </button>
   );
 
+  if (!githubToken || !user) {
+    return (
+      <div className="min-h-screen bg-bg flex items-center justify-center p-6 relative overflow-hidden">
+        {/* Radial Background Elements */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-accent/5 rounded-full blur-3xl" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-accent/10 rounded-full blur-2xl" />
+        
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="relative z-10 w-full max-w-md card-minimal p-8 md:p-12 space-y-8 text-center"
+        >
+          <div className="space-y-2">
+            <div className="w-16 h-16 bg-accent/10 text-accent rounded-2xl flex items-center justify-center mx-auto mb-6">
+              <Code2 size={32} />
+            </div>
+            <h1 className="text-3xl font-serif font-bold tracking-tight">Deepayan OS</h1>
+            <p className="text-ink/60 text-sm">Connect your GitHub Gist to sync your progress across devices.</p>
+          </div>
+
+          <form 
+            onSubmit={(e) => {
+              e.preventDefault();
+              const token = (e.currentTarget.elements.namedItem('token') as HTMLInputElement).value;
+              if (token) checkAuth(token);
+            }}
+            className="space-y-4"
+          >
+            <div className="space-y-2 text-left">
+              <label className="text-[10px] uppercase tracking-widest font-bold opacity-40 ml-1">GitHub Personal Access Token</label>
+              <input 
+                name="token"
+                type="password"
+                placeholder="ghp_xxxxxxxxxxxx"
+                required
+                className="w-full px-4 py-3 rounded-xl bg-muted border border-border focus:border-accent outline-none transition-all font-mono text-sm"
+              />
+              {loginError && <p className="text-xs text-red-500 mt-1 ml-1">{loginError}</p>}
+            </div>
+            <button 
+              type="submit"
+              disabled={isSyncing}
+              className="w-full py-4 bg-accent text-white rounded-xl font-bold shadow-lg shadow-accent/20 hover:opacity-90 transition-all disabled:opacity-50"
+            >
+              {isSyncing ? 'Verifying...' : 'Connect & Sync'}
+            </button>
+          </form>
+
+          <div className="pt-4 border-t border-border">
+            <p className="text-[10px] text-ink/40 leading-relaxed">
+              Don't have a token? <a href="https://github.com/settings/tokens/new?description=DeepayanOS&scopes=gist,user" target="_blank" rel="noreferrer" className="text-accent hover:underline">Create a Classic Token</a> with <span className="font-bold">gist</span> and <span className="font-bold">user</span> scopes.
+            </p>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col md:flex-row bg-bg text-ink">
       {/* Mobile Header */}
@@ -276,7 +457,14 @@ export default function App() {
               <SidebarItem id="settings" icon={Settings} label="Settings" />
             </nav>
 
-            <div className="mt-auto pt-6 border-t border-border">
+            <div className="mt-auto pt-6 border-t border-border space-y-2">
+              <div className="flex items-center gap-3 px-4 py-3 rounded-lg bg-muted/50">
+                <img src={user.avatar_url} alt={user.login} className="w-8 h-8 rounded-full border border-border" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-bold truncate">{user.name || user.login}</p>
+                  <button onClick={handleLogout} className="text-[10px] text-red-500 font-bold uppercase hover:underline">Logout</button>
+                </div>
+              </div>
               <button 
                 onClick={() => setIsDarkMode(!isDarkMode)}
                 className="flex items-center gap-3 w-full px-4 py-3 rounded-lg hover:bg-muted transition-colors"
@@ -310,12 +498,25 @@ export default function App() {
             >
               <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                 <div>
-                  <p className="text-accent font-medium uppercase tracking-widest text-xs mb-2">Welcome back</p>
+                  <p className="text-accent font-medium uppercase tracking-widest text-xs mb-2">
+                    {user ? `Welcome back, ${user.name || user.login}` : 'Welcome back'}
+                  </p>
                   <h2 className="text-4xl md:text-5xl font-serif font-bold">Today's Focus</h2>
                 </div>
-                <div className="flex items-center gap-4 bg-muted px-4 py-2 rounded-full">
-                  <Clock size={18} className="text-accent" />
-                  <span className="font-mono text-sm">{format(new Date(), 'EEEE, MMMM do')}</span>
+                <div className="flex flex-col items-end gap-2">
+                  <div className="flex items-center gap-4 bg-muted px-4 py-2 rounded-full">
+                    <Clock size={18} className="text-accent" />
+                    <span className="font-mono text-sm">{format(new Date(), 'EEEE, MMMM do')}</span>
+                  </div>
+                  {user && (
+                    <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-tighter opacity-40">
+                      {isSyncing ? (
+                        <span className="flex items-center gap-1"><TrendingUp size={10} className="animate-pulse" /> Syncing...</span>
+                      ) : (
+                        <span>Synced to Gist {lastSyncedAt ? format(lastSyncedAt, 'HH:mm') : 'Never'}</span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </header>
 
